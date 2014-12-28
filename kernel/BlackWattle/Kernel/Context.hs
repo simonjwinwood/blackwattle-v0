@@ -1,3 +1,4 @@
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE RankNTypes #-}
 
 {- Context.hs --- theorem contexts
@@ -6,11 +7,15 @@
 
 module BlackWattle.Kernel.Context where
 
+import           Control.Lens
 import           Control.Monad.Except
+import           Control.Monad.Reader
 import           Control.Monad.State
 import           Data.Map (Map)
 import qualified Data.Map as M
+import           Data.Maybe (isJust)
 import           Data.Monoid
+import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Text.PrettyPrint as P
 import           Text.PrettyPrint hiding (parens)
@@ -19,33 +24,21 @@ import           BlackWattle.Kernel.Types
 import           BlackWattle.Kernel.Term
 import           BlackWattle.Kernel.Theorem
 
-rootContextId :: ContextId
-rootContextId  = []
+-- * Contexts
 
--- returns the deepest context first (reverse search order)
-contextTreePath :: ContextId -> ContextTree -> Maybe [Context]
-contextTreePath = go []
-  where
-   go acc cid tree = let acc' = ctContext tree : acc
-                     in case cid of
-                          []         -> return acc'
-                          (c : cid') -> go acc' cid' =<< M.lookup c (ctChildren tree)
+-- To avoid clashing with Lens ...
 
--- FIXME: use fully qualified names?  This just finds the first ...
-lookupTheorem :: TheoremName -> ContextM st (Maybe (Theorem st))
-lookupTheorem thmN = ContextM $ gets (msum . map (findIt . theorems))
-  where
-    findIt m = do tm <- M.lookup thmN m
-                  return $ Theorem { thydeps = S.singleton thmN
-                                   , hypotheses = mempty
-                                   , prop = tm }
+data Ctxt = Ctxt { _freeTypes   :: Set TConstName            -- ^ Those types which are free
+                 , _freeConstNames  :: Set ConstName             -- ^ Those consts which are free 
+                 , _types       :: Map TConstName  Int       -- ^ All types and their 
+                 , _consts      :: Map ConstName   Type      -- ^ All consts and their types
+                 , _theorems    :: Map TheoremName Term  -- ^ Theorems in context
+                 }
+           deriving Show
 
+makeLenses ''Ctxt
 
-constType :: Const -> ContextM st (Maybe Type)
-constType constN = ContextM $ gets (msum . map (M.lookup constN . consts))
-
-typeArity :: TConst -> ContextM st (Maybe Int)
-typeArity tconstN = ContextM $ gets (msum . map (M.lookup tconstN . types))
+-- * Utility functions
 
 maybeToError :: MonadError e m => e -> Maybe a -> m a
 maybeToError e v = case v of
@@ -53,33 +46,25 @@ maybeToError e v = case v of
                      Just v' -> return v'
 
 -- | Internal only!
-runContextM :: [Context] -> ContextM st a -> a
-runContextM ctxt m = evalState (unContextM m) ctxt
+-- runContextM :: [Context] -> ContextM st a -> a
+-- runContextM ctxt m = runReader (unContextM m) ctxt
 
-withContext :: ContextId -> (forall st. ContextM st a) -> BWM a
-withContext cid m = BWM $ do ctxt <- maybeToError "Not found" =<< gets (contextTreePath cid)
-                             return $ evalState (unContextM m) ctxt
+addAxiom :: TheoremName -> Term -> Ctxt -> Ctxt
+addAxiom = addTheorem -- Mainly for documentation
 
-primAddTheorem :: TheoremName -> Term -> Context -> Context
-primAddTheorem thmN tm ctxt = ctxt { theorems = M.insert thmN tm $ theorems ctxt }
+addTheorem :: TheoremName -> Term -> Ctxt -> Ctxt
+addTheorem thmN tm = theorems . at thmN .~ Just tm
 
-primAddConst :: Const -> Type -> Context -> Context
-primAddConst nm ty ctxt = ctxt { consts = M.insert nm ty $ consts ctxt }
+addConst :: ConstName -> Type -> Ctxt -> Ctxt
+addConst nm ty   = consts . at nm .~ Just ty
 
-primDefineConst :: Const -> Type -> Term -> Context -> Context
-primDefineConst nm ty def ctxt = primAddTheorem (nm ++ "_def")
-                                                (mkEq ty (Const nm ty) def)
-                                                (primAddConst nm ty ctxt)
+addType :: TConstName -> Int -> Ctxt -> Ctxt
+addType nm arity = types . at nm .~ Just arity
 
--- * Pretty printing
-
-prettyContext :: Context -> Doc
-prettyContext c = text "freeTypes ="      <+> braces (sep . punctuate comma . map text . S.toList . freeTypes $ c )
-                  $+$ text "freeConsts =" <+> braces (sep . punctuate comma . map text . S.toList . freeConsts $ c )
-                  $+$ text "types ="      <+> (vcat . map (\(n, arity) -> text n <+> colon <+> int arity) . M.toList . types $ c)
-                  $+$ text "consts ="     <+> (vcat . map (\(n, ty) -> text n <+> colon <+> prettyType ty) . M.toList . consts $ c)
-                  $+$ text "theorems ="   <+> (vcat . map (\(n, tm) -> text n <+> colon <+> prettyTerm tm) . M.toList . theorems $ c)
-
+defineConst :: ConstName -> TheoremName -> Type -> Term -> Ctxt -> Ctxt
+defineConst nm thmN ty def ctxt = addTheorem thmN
+                                             (mkEq ty (Constant nm ty) def)
+                                             (addConst nm ty ctxt)
 
   -- where
 

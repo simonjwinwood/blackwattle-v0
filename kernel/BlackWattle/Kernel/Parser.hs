@@ -2,7 +2,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 
--- A simple parser for making writing some terms nicer
+-- A simple parser for making writing some terms nicer.  Only in the kernel for bootstrapping ...
 
 module BlackWattle.Kernel.Parser (termQ, typeQ) where
 
@@ -14,8 +14,10 @@ import           Language.Haskell.TH.Quote
 
 import           Text.Parsec
 
+import           BlackWattle.Kernel.Context (types, consts)
+import           BlackWattle.Kernel.Term
 import           BlackWattle.Kernel.Types
-import           BlackWattle.Kernel.Context (typeArity, constType)
+import           BlackWattle.Kernel.World
 
 -- Might not need the intermediate types?
 data TypeTree = TVarQ String
@@ -33,17 +35,17 @@ data TermTree = VarQ String
 
 -- * Translation to Term/Type
 
-typeTreeToType :: TypeTree -> ContextM st Type
-typeTreeToType = go []
+typeTreeToType :: TypeTree -> WorldM st Type
+typeTreeToType tree = go [] tree
   where
-   go targs (TVarQ v)      = do m_arity <- typeArity v
-                                case m_arity of
-                                   Nothing
-                                     | null targs -> return $ TFree v
-                                     | otherwise  -> error $ "Type args to a type variable: " ++ v
-                                   Just n
-                                     | length targs == n -> return $ TConst v targs
-                                     | otherwise         -> error $ "Wrong no. args to " ++ v                              
+   go targs (TVarQ v) = do m_arity <- resolveType v
+                           case m_arity of
+                              Nothing
+                                | null targs -> return $ TFree v
+                                | otherwise  -> error $ "Type args to a type variable: " ++ v
+                              Just (_cid, n)
+                                | length targs == n -> return $ TConst v targs
+                                | otherwise         -> error $ "Wrong no. args to " ++ v                              
    go targs (TAppQ l r)    = do r' <- go [] r
                                 go (r' : targs) l
    go _     (TMetaInstQ t) = return t
@@ -51,15 +53,15 @@ typeTreeToType = go []
 
 -- FIXME: We only allow closed terms currently ...
 -- FIXME: cterm?
-termTreeToTerm :: TermTree -> ContextM st Term
-termTreeToTerm = go []
+termTreeToTerm :: TermTree -> WorldM st Term
+termTreeToTerm t = go [] t
   where
     go env (VarQ v) 
       | Just n <- elemIndex v env = return $ Bound n
-      | otherwise  = do m_type <- constType v
+      | otherwise  = do m_type <- resolveConst v
                         case m_type of
-                          Nothing -> error $ "Free constant " ++ v
-                          Just ty -> return $ Const v ty
+                          Nothing         -> error $ "Free constant " ++ v ++ " " ++ show t
+                          Just (_cid, ty) -> return $ Constant v ty
     go env (LambdaQ n ty tm) = Lambda n <$> typeTreeToType ty <*> go (n : env) tm
     go env (AppQ l r)        = (:$) <$> go env l <*> go env r
     go _   (MetaInstQ t)     = return t
@@ -138,21 +140,31 @@ tmetaP  = lexeme (do string "$"
         
 termP, lambdaP  :: ParserM TermTree
 
-termP    = do l <- lamOrApp
-              (do symbol "="
-                  r <- lamOrApp
-                  return (AppQ (AppQ (VarQ EqualN) l) r)) <|> return l
+infixes = [ ("=", EqualN)
+          , ("-->", ImplN)
+          , ("/\\", AndN)
+          , ("\\/", OrN)
+          ]
 
-lamOrApp = lambdaP <|> (foldl1 AppQ <$> many1 nonLamP)
+termP    = do l <- lamOrApp
+              (do n <- choice (map (\(sym, n) -> symbol sym >> return n) infixes)
+                  r <- lamOrApp
+                  return (AppQ (AppQ (VarQ n) l) r)) <|> return l
+
+lamOrApp = lambdaP <|> allP <|> exP <|> (foldl1 AppQ <$> many1 nonLamP)
 nonLamP = parens termP <|> metaP <|> lexeme (VarQ <$> ident)
 
-lambdaP = do symbol "\\"
-             v <- lexeme ident
-             symbol ":"
-             t <- tappP
-             symbol "->"
-             body <- termP
-             return (LambdaQ v t body)
+binderP start f = do start
+                     v <- lexeme ident
+                     symbol ":"
+                     t <- typeP
+                     symbol "."
+                     body <- termP
+                     return (f v t body)
+
+lambdaP = binderP (symbol "\\") LambdaQ
+allP    = binderP (symbol "!") (\n ty t -> AppQ (VarQ AllN) (LambdaQ n ty t))
+exP     = binderP (symbol "?") (\n ty t -> AppQ (VarQ ExN) (LambdaQ n ty t))
 
 metaP  = lexeme (do string "$"
                     MetaQ <$> ident

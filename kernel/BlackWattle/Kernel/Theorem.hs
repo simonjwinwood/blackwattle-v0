@@ -1,4 +1,5 @@
 {-# Language PatternGuards #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module BlackWattle.Kernel.Theorem where
 
@@ -15,15 +16,84 @@ import           Data.Monoid
 import           BlackWattle.Kernel.Types
 import           BlackWattle.Kernel.Term
 
+-- * Theorem datatype
+
+type HypSet      = [Term]
+
+-- There are 3 flavours of theorems:
+--   1. Internal theorems
+--   2. External theorems
+--   3. Stored theorems
+--
+-- An internal theorems is the subject of the various proof rules
+-- (functions); an external theorem is one which explicitly carries
+-- its context; and a stored theorem is one which is internal to the
+-- context tree.
+--
+-- They are related by
+--
+--           /--- lookupTheorem -->\                /--- extern ---->\ 
+-- Stored --|                       |-- Internal --|                  |-- External
+--           \<-- storeTheorem  ---/                \<-- intern -----/    
+--
+--
+-- We might be able to unify these, but there are 3 logical views
+
+-- TODO:
+-- - Term namespaces. like foo.def
+-- definitions
+-- types
+
+-- The 'st' ensures theorems can't escape this context (well, ensures
+-- theorems aren't introduced.
+
+data Theorem st = Theorem { thmDeps    :: Set TheoremName
+                          , hypotheses :: HypSet
+                          , prop       :: Term } 
+           deriving Show
+
+data ExtTheorem = ExtTheorem { extThmDeps :: Map FullTheoremName Term
+                             , extTypes   :: Map FullTConstName  Int    -- required?
+                             , extConsts  :: Map FullConstName Type
+                             , extHyps    :: HypSet
+                             , extProp    :: Term
+                             }
+
+data CTerm st = CTerm { ctermTerm :: Term, ctermType :: Type }
+    deriving Show
+
+newtype CType st = CType { unCType :: Type }
+    deriving Show
+
+type CTypeSubst st = [(CType st, CType st)]
+type CTermSubst st = [(CTerm st, CTerm st)]
+
+-- | Certified destructors
+
+propC :: Theorem st -> CTerm st
+propC thm = CTerm (prop thm) boolT
+
+destCombC :: CTerm st -> Maybe (CTerm st, CTerm st)
+destCombC cterm = do l :$ r <- return $ ctermTerm cterm
+                     return (CTerm l (typeOf l), CTerm r (typeOf r))
+
+destBinC :: ConstName -> CTerm st -> Maybe (CTerm st, CTerm st)
+destBinC n cterm
+  | Constant n' ty :$ l :$ r <- ctermTerm cterm, n == n',
+    tyl :-> tyr :-> _        <- ty  = Just (CTerm l tyl, CTerm r tyr)
+destBinC _ _                        = Nothing
+
+-- | Theorem constructors (meta-axioms and -rules)
+
 mergeHyps :: HypSet -> HypSet -> HypSet
 mergeHyps = mappend
 
 emptyTheorem :: Term -> Theorem st
-emptyTheorem p = Theorem { thydeps = mempty, hypotheses = mempty, prop = p }
+emptyTheorem p = Theorem { thmDeps = mempty, hypotheses = mempty, prop = p }
 
 mergeTheorems :: Theorem st -> Theorem st -> Term -> Theorem st
 mergeTheorems thm thm' p =
-    Theorem { thydeps = thydeps thm `mappend` thydeps thm' 
+    Theorem { thmDeps = thmDeps thm `mappend` thmDeps thm' 
             , hypotheses = mergeHyps (hypotheses thm) (hypotheses thm')
             , prop = p
             }
@@ -77,7 +147,7 @@ betaConv (CTerm tm ty) = do tm' <- beta tm
 --  [A] |- A
 assume :: CTerm st -> Maybe (Theorem st)
 assume (CTerm tm ty) = do guard (ty == boolT)
-                          return $ Theorem { thydeps = mempty, hypotheses = [tm], prop = tm }
+                          return $ Theorem { thmDeps = mempty, hypotheses = [tm], prop = tm }
 
 -- |  A |- l = r
 --    B |- l   
@@ -94,7 +164,7 @@ eqMP eqthm thm = do (l, r, ty)   <- destEq $ prop eqthm
 
 inst :: CTermSubst st -> CTypeSubst st -> Theorem st -> Maybe (Theorem st)
 inst insts instsT thm = do guard $ all (uncurry sameType) insts
-                           return $ Theorem { thydeps = thydeps thm
+                           return $ Theorem { thmDeps = thmDeps thm
                                             , hypotheses = map subst (hypotheses thm)
                                             , prop = subst (prop thm)
                                             }
@@ -108,8 +178,8 @@ inst insts instsT thm = do guard $ all (uncurry sameType) insts
 --  ----------------------
 --   (A - {q}) U (B - {p}) |- p <--> q
 deductAntiSym :: Theorem st -> Theorem st -> Theorem st
-deductAntiSym thm1 thm2 = Theorem { thydeps = thydeps thm1 `mappend` thydeps thm2
+deductAntiSym thm1 thm2 = Theorem { thmDeps = thmDeps thm1 `mappend` thmDeps thm2
                                   , hypotheses = mergeHyps (delete (prop thm2) (hypotheses thm1))
                                                            (delete (prop thm1) (hypotheses thm2))
-                                   , prop = mkEq boolT (prop thm1) (prop thm2)
+                                  , prop = mkEq boolT (prop thm1) (prop thm2)
                                   }

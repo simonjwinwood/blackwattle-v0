@@ -1,35 +1,77 @@
 {-# LANGUAGE RankNTypes #-} -- for eqTerm and destAppE
 {-# LANGUAGE PatternGuards #-} 
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module BlackWattle.Kernel.Term where
 
-import Data.List (intersperse)
-import Data.Maybe (fromMaybe)
-import Control.Applicative ( (<*>), (<$>), pure )
+import           Control.Applicative ( (<*>), (<$>), pure )
+
+import           Data.Data -- makes TH parsing easier
+import           Data.List (intersperse, concatMap, nub, sort)
+import           Data.Maybe (fromMaybe)
     
-import Text.PrettyPrint hiding (parens)
-import qualified Text.PrettyPrint as P
+import           BlackWattle.Kernel.Types
+import           BlackWattle.Util.Update
 
-import BlackWattle.Kernel.Types
-import BlackWattle.Util.Update
+-- * Datatypes
 
-parens :: Bool -> Doc -> Doc
-parens b s = if b then P.parens s else s 
+data Type = TFree TVar
+          | TConst TConstName [Type]
+            deriving (Eq, Ord, Show, Data, Typeable)
 
-prettyType :: Type -> Doc
-prettyType = go False
-    where
-    go _p (TFree v)     = text v
-    go _p (TConst c []) = text c
-    go p t@(TConst c ts) 
-        | Just (ltp, rtp) <- destFunT t = parens p $ go True ltp <+> text "->" <+> go False rtp
-        | otherwise                     = parens p $ text c <+> (hsep $ map (go True) ts)
+-- * Term
 
--- ** Constructing and tearing down types
+infixl :$
+
+data Term = Free { name :: Name, typ :: Type }
+          | Bound { depth :: Int }
+          | Constant { name :: ConstName, typ :: Type }
+          -- | The name here need not be unique, and should be converted before sending to user
+          | Lambda { name :: Name, typ :: Type, body :: Term }
+          -- | Applicatio, or Comb if you are that way inclined
+          | (:$)   Term Term 
+            deriving (Show, Data, Typeable)
 
 infixr :->
 pattern a :-> r = TConst FunN [a, r]
+pattern l := r  <- ((Constant EqualN _) :$ l) :$ r
+
+-- | Equality on Terms is alpha equivalence
+instance Eq Term where
+    (Free v t) == (Free v' t')            = v == v' && t == t'
+    (Bound n) == (Bound m)                = n == m
+    (Constant c t) == (Constant c' t')    = c == c' && t == t'
+    (Lambda _ tp t) == (Lambda _ tp' t')  = tp == tp' && t == t' -- Ignore names
+    (tf :$ ta) == (tf' :$ ta')            = tf == tf' && ta == ta'
+    _ == _                                = False
+
+-- Hopefully this is more efficient than just <=
+-- | Ordering on Terms ignored name annotations on binders
+instance Ord Term where
+    (Free n tp) `compare` (Free n' tp') = (n, tp) `compare` (n', tp')
+    (Free {})   `compare` _             = LT
+
+    (Bound {})  `compare` (Free {})     = GT
+    (Bound n)   `compare` (Bound n')    = n `compare` n'
+    (Bound {})  `compare` _             = LT
+
+    (Constant {})  `compare` (Free {})     = GT
+    (Constant {})  `compare` (Bound {})    = GT
+    (Constant c t) `compare` (Constant c' t') = (c, t) `compare` (c', t')
+    (Constant {})  `compare` _             = LT
+
+    (Lambda {}) `compare` (Free {})     = GT
+    (Lambda {}) `compare` (Bound {})    = GT
+    (Lambda {}) `compare` (Constant {})    = GT
+    (Lambda _ tp t) `compare` (Lambda _ tp' t')  = (tp, t) `compare` (tp', t')
+    (Lambda {}) `compare` _             = LT
+
+    (l :$ r) `compare` (l' :$ r')       = (l, r) `compare` (l', r')
+    (_ :$ _) `compare` _                = GT
+
+
+-- ** Constructing and tearing down types
 
 (~>>) :: [Type] -> Type -> Type
 (~>>) as r = foldr (:->) r as
@@ -41,6 +83,9 @@ destFunT :: Type -> Maybe (Type, Type)
 destFunT (a :-> r) = Just (a, r)
 destFunT _         = Nothing
 
+destComb :: Term -> Maybe (Term, Term)
+destComb (l :$ r) = Just (l, r)
+destComb _        = Nothing
 
 stripLambda :: Term -> ([(Name, Type)], Term)
 stripLambda = go []
@@ -67,7 +112,7 @@ mapTypes f t = project $ go t
       go, go' :: Term -> Update Term
       go t = go' t <!> t
       go' (Free v ty)        = Free v <$> f' ty
-      go' (Const c ty)       = Const c <$> f' ty
+      go' (Constant c ty)       = Constant c <$> f' ty
       go' (Lambda n ty body) = Lambda n <$> f' ty <*> go body
       go' (l :$ r)           = (:$) <$> go l <*> go r
       go' t                  = pure t
@@ -75,9 +120,6 @@ mapTypes f t = project $ go t
 -- ** Type unifiers
 type TypeSubst = [(Type, Type)]
 type TermSubst = [(Term, Term)]
-
-prettyTypeSubst :: TypeSubst -> Doc
-prettyTypeSubst = vcat . map (\(v, t) -> prettyType v <+> colon <+> prettyType t)
 
 addSubst :: Type -> Type -> (TypeSubst -> TypeSubst)
 addSubst tv t tu = (tv, t) : tu
@@ -103,31 +145,10 @@ substTermType insts instsT = project . go
       go t = go' t <!> t
       -- Do the term substitution first and then the type subst if it doesn't do anything
       go' t@(Free v ty)      = f t <||> (Free v <$> fty ty)
-      go' (Const c ty)       = Const c <$> fty ty
+      go' (Constant c ty)       = Constant c <$> fty ty
       go' (Lambda n ty body) = Lambda n <$> fty ty <*> go body
       go' (l :$ r)           = (:$) <$> go l <*> go r
       go' t                  = pure t
-
-prettyTerm :: Term -> Doc
-prettyTerm = go [] False
-    where
-      go _ _ t@(Free {})     = text $ name t
-      go env _ t@(Bound {})  = text $ fst $ env !! depth t
-      go _ _ t@(Const {})    = text $ name t
-      go env p t             = let (bs, t', as) = flatten t 
-                               in parens p $ binds bs <+> app (bs ++ env) t' as
-      binds []               = empty
-      binds bs               = text "\\" <> hsep (map (text . fst) $ reverse bs) <+> text "->"
-
-      app env (Const EqualN _) [l, r] = go env True l <+> equals <+> go env True r
-      app env (Const AndN _)   [l, r] = go env True l <+> text "/\\" <+> go env True r
-      app env (Const ImplN _)  [l, r] = go env True l <+> text "-->" <+> go env True r
-      app env t                as     = go env False t <+> args env False as
-
-      args _ _ []            = empty 
-      args env p as          = hsep $ map (go env True) as
-
-
 
 -- ** Constructors and destructors
 
@@ -150,10 +171,10 @@ lambda :: Name -> Type -> Term -> Term
 lambda x tp t = Lambda x tp (abstract (Free x tp) t)
 
 mkEq :: Type -> Term -> Term -> Term
-mkEq ty l r = (Const EqualN (ty :-> ty :-> boolT) :$ l :$ r)
+mkEq ty l r = (Constant EqualN (ty :-> ty :-> boolT) :$ l :$ r)
 
 destEq :: Term -> Maybe (Term, Term, Type)
-destEq (Const EqualN ty :$ l :$ r)
+destEq (Constant EqualN ty :$ l :$ r)
     | Just (ty, _) <- destFunT ty        = Just (l, r, ty) 
 destEq _                                 = Nothing
 
@@ -216,14 +237,13 @@ beta ((Lambda _ _ b) :$ t)      = Just $ subst t b
 beta t                          = Nothing
 
 
-prettyCTerm (CTerm tm tp) = 
-    prettyTerm tm <+> colon <+> prettyType tp
+-- prettyCTerm (CTerm tm tp) = prettyTerm tm <+> colon <+> prettyType tp
 
-ctermTerm :: CTerm st -> Term
-ctermTerm (CTerm tm _) = tm
+-- ctermTerm :: CTerm st -> Term
+-- ctermTerm (CTerm tm _) = tm
 
-ctermType :: CTerm st -> Type
-ctermType (CTerm _ ty) = ty
+-- ctermType :: CTerm st -> Type
+-- ctermType (CTerm _ ty) = ty
 
 -- Well-typed terms only!
 typeOf :: Term -> Type
@@ -233,13 +253,35 @@ typeOf = go []
     go env (Bound n)
       | n < length env  = env !! n
       | otherwise       = error "Out of bound variable"
-    go _   (Const _ ty) = ty
+    go _   (Constant _ ty) = ty
     go env (Lambda _ ty t) = ty :-> go (ty : env) t
     go env (l :$ _)     = case go env l of
                             _ :-> ty -> ty
                             _        -> error "Not a function type"
 
+freeTypesInType :: Type -> [TVar]
+freeTypesInType = nub . sort . go -- only a few typed expected in a term, so no need to use Set etc.
+  where
+    go (TFree tv)    = [tv]
+    go (TConst _ ts) = concatMap go ts
 
+freeTypesInTerm :: Term -> [TVar]
+freeTypesInTerm = nub . sort . go
+  where
+    go (Free _ ty)     = freeTypesInType ty
+    go (Bound _)       = []
+    go (Constant _ ty)    = freeTypesInType ty
+    go (Lambda _ ty t) = freeTypesInType ty ++ go t
+    go (l :$ r)        = go l ++ go r
+
+freeVarsInTerm :: Term -> [(Name, Type)]
+freeVarsInTerm = nub . sort . go
+  where
+    go (Free n ty)     = [(n, ty)]
+    go (Lambda _ _ t)  = go t
+    go (l :$ r)        = go l ++ go r
+    go _               = []
+    
 {-
 
 newtype EqTerm a = EqTerm { unEqTerm :: Term }

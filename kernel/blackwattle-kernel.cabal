@@ -21,6 +21,7 @@ library
                      , BlackWattle.Kernel.Term
                      , BlackWattle.Kernel.Theorem
                      , BlackWattle.Kernel.Context
+                     , BlackWattle.Kernel.World
                      , BlackWattle.Util.Update
    
   build-depends:       base
@@ -31,3 +32,4 @@ library
                      , parsec
                      , template-haskell
                      , pretty-show
+                     , lens
