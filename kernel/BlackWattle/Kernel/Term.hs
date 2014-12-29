@@ -5,30 +5,30 @@
 
 module BlackWattle.Kernel.Term where
 
-import           Control.Applicative ( (<*>), (<$>), pure )
-
-import           Data.Data -- makes TH parsing easier
-import           Data.List (intersperse, concatMap, nub, sort)
-import           Data.Maybe (fromMaybe)
+import Control.Applicative ( (<*>), (<$>), pure )
+import Control.Monad (mapM)
+import Data.Data -- makes TH parsing easier
+import Data.List (intersperse, concatMap, nub, sort)
+import Data.Maybe (fromMaybe)
     
-import           BlackWattle.Kernel.Types
-import           BlackWattle.Util.Update
+import BlackWattle.Kernel.Types
+import BlackWattle.Util.Update
 
 -- * Datatypes
 
 data Type = TFree TVar
-          | TConst TConstName [Type]
+          | TConst (FQName TConstName) [Type]
             deriving (Eq, Ord, Show, Data, Typeable)
 
 -- * Term
 
 infixl :$
 
-data Term = Free { name :: Name, typ :: Type }
+data Term = Free { freeName :: Name, typ :: Type }
           | Bound { depth :: Int }
-          | Constant { name :: ConstName, typ :: Type }
+          | Constant { constName :: FQName ConstName, typ :: Type }
           -- | The name here need not be unique, and should be converted before sending to user
-          | Lambda { name :: Name, typ :: Type, body :: Term }
+          | Lambda { boundName :: Name, typ :: Type, body :: Term }
           -- | Applicatio, or Comb if you are that way inclined
           | (:$)   Term Term 
             deriving (Show, Data, Typeable)
@@ -90,7 +90,7 @@ destComb _        = Nothing
 stripLambda :: Term -> ([(Name, Type)], Term)
 stripLambda = go []
     where
-    go env t@(Lambda {}) = go ((name t, typ t) : env) (body t)
+    go env t@(Lambda {}) = go ((boundName t, typ t) : env) (body t)
     go env t             = (env, t)
 
 stripComb :: Term -> (Term, [Term])
@@ -112,17 +112,36 @@ mapTypes f t = project $ go t
       go, go' :: Term -> Update Term
       go t = go' t <!> t
       go' (Free v ty)        = Free v <$> f' ty
-      go' (Constant c ty)       = Constant c <$> f' ty
+      go' (Constant c ty)    = Constant c <$> f' ty
       go' (Lambda n ty body) = Lambda n <$> f' ty <*> go body
       go' (l :$ r)           = (:$) <$> go l <*> go r
       go' t                  = pure t
 
 -- ** Type unifiers
-type TypeSubst = [(Type, Type)]
-type TermSubst = [(Term, Term)]
+-- Invariant:
+--    (x -> y)  : S --> !yv : frees y. yv ~: dom S
+-- i.e., substitutions are applied only once and isn't reflexive 
 
-addSubst :: Type -> Type -> (TypeSubst -> TypeSubst)
-addSubst tv t tu = (tv, t) : tu
+type Subst a   = [(a, a)]
+type TypeSubst = Subst Type 
+type TermSubst = Subst Term
+
+-- FIXME: this is the paranoid version, we can make it more efficient later
+-- FIXME: use Update
+addSubst :: Eq a => (Subst a -> a -> a) -> a -> a -> (Subst a -> Subst a)
+addSubst f l r substs
+  | Just _  <- lookup l substs = error $ "Saw lhs twice"
+  | r' == l                    = substs
+  | otherwise                  = substlet ++ map (\(k, v) -> (k, f substlet v)) substs
+  where
+    r' = f substs r
+    substlet = [(l, r')]
+
+addTypeSubst :: Type -> Type -> (TypeSubst -> TypeSubst)
+addTypeSubst = addSubst substType
+
+addTermSubst :: Term -> Term -> (TermSubst -> TermSubst)
+addTermSubst = addSubst (\inst -> substTermType inst emptySubst)
 
 emptySubst = []
 
@@ -136,16 +155,28 @@ typeSubst tus tv = lookup tv tus
 termSubst :: TermSubst -> Term -> Maybe Term
 termSubst tus t  = lookup t tus
 
+substType :: TypeSubst -> Type -> Type
+substType instsT = project . substType' instsT
+
+substType' :: TypeSubst -> Type -> Update Type
+substType' instsT = go
+  where
+    fty = liftUpdate (typeSubst instsT)
+    go, go' :: Type -> Update Type
+    go ty = go' ty <!> ty
+    go' ty@(TFree _)   = fty ty
+    go' (TConst c tys) = TConst c <$> mapM go tys
+
 substTermType :: TermSubst -> TypeSubst -> Term -> Term
 substTermType insts instsT = project . go
     where
-      fty = liftUpdate (typeSubst instsT)
+      fty = substType' instsT
       f   = liftUpdate (termSubst insts)
       go, go' :: Term -> Update Term
       go t = go' t <!> t
       -- Do the term substitution first and then the type subst if it doesn't do anything
       go' t@(Free v ty)      = f t <||> (Free v <$> fty ty)
-      go' (Constant c ty)       = Constant c <$> fty ty
+      go' (Constant c ty)    = Constant c <$> fty ty
       go' (Lambda n ty body) = Lambda n <$> fty ty <*> go body
       go' (l :$ r)           = (:$) <$> go l <*> go r
       go' t                  = pure t

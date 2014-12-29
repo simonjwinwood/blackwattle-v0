@@ -26,9 +26,9 @@ prettyTypeSubst = vcat . map (\(v, t) -> prettyType v <+> colon <+> prettyType t
 prettyTerm :: Term -> Doc
 prettyTerm = go [] False
     where
-      go _ _ t@(Free {})     = text $ name t
+      go _ _ t@(Free {})     = text $ freeName t
       go env _ t@(Bound {})  = text $ fst $ env !! depth t
-      go _ _ t@(Constant {})    = text $ name t
+      go _ _ t@(Constant {}) = prettyFQN text $ constName t
       go env p t             = let (bs, t', as) = flatten t 
                                in pparens p $ binds bs <+> app (bs ++ env) t' as
       binds []               = empty
@@ -41,15 +41,18 @@ prettyTerm = go [] False
 
       args _ _ []            = empty 
       args env p as          = hsep $ map (go env True) as
-      
+
+prettyFQN :: (a -> Doc) -> FQName a -> Doc
+prettyFQN f fqn = (cat $ punctuate (text ".") (map text $ fqnContext fqn)) <> text "." <> f (fqnName fqn)
+
 prettyType :: Type -> Doc
 prettyType = go False
     where
     go _p (TFree v)     = text v
-    go _p (TConst c []) = text c
+    go _p (TConst c []) = prettyFQN text c
     go p t@(TConst c ts) 
         | Just (ltp, rtp) <- destFunT t = pparens p $ go True ltp <+> text "->" <+> go False rtp
-        | otherwise                     = pparens p $ text c <+> (hsep $ map (go True) ts)
+        | otherwise                     = pparens p $ prettyFQN text c <+> (hsep $ map (go True) ts)
 
 prettyContext :: Ctxt -> Doc
 prettyContext c = text "freeTypes ="      <+> braces (sep . punctuate comma . map text . S.toList . view freeTypes $ c )
@@ -63,3 +66,14 @@ prettyContextTree tree = prettyContext (tree ^. ctContext) -- FIXME
 
 prettyWorld :: World -> Doc
 prettyWorld w = prettyContextTree (w ^. contextTree)
+
+prettyTheorem :: Theorem st -> Doc
+prettyTheorem thm = brackets (sep $ punctuate comma $ map prettyTerm $ hypotheses thm)
+                    <+> text "|-"
+                    <+> prettyTerm (prop thm)
+
+prettyExtTheorem :: ExtTheorem -> Doc
+prettyExtTheorem thm = brackets (sep $ punctuate comma $ map prettyTerm $ extHyps thm)
+                        <+> text "|-"
+                        <+> prettyTerm (extProp thm)
+

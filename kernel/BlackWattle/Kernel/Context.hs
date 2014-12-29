@@ -61,16 +61,7 @@ addConst nm ty   = consts . at nm .~ Just ty
 addType :: TConstName -> Int -> Ctxt -> Ctxt
 addType nm arity = types . at nm .~ Just arity
 
-defineConst :: ConstName -> TheoremName -> Type -> Term -> Ctxt -> Ctxt
+defineConst :: FQName ConstName -> TheoremName -> Type -> Term -> Ctxt -> Ctxt
 defineConst nm thmN ty def ctxt = addTheorem thmN
                                              (mkEq ty (Constant nm ty) def)
-                                             (addConst nm ty ctxt)
-
-  -- where
-
-    -- data Context = Context { freeTypes   :: Set TConst            -- ^ Those types which are free
-    --                        , freeConsts  :: Set Const             -- ^ Those consts which are free 
-    --                        , types       :: Map TConst  Int       -- ^ All types and their 
-    --                        , consts      :: Map Const   Type      -- ^ All consts and their types
-    --                        , theorems    :: Map TheoremName Term  -- ^ Theorems in context
-    --                        }
+                                             (addConst (fqnName nm) ty ctxt)

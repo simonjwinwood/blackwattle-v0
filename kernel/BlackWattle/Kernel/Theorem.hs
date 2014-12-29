@@ -77,7 +77,7 @@ destCombC :: CTerm st -> Maybe (CTerm st, CTerm st)
 destCombC cterm = do l :$ r <- return $ ctermTerm cterm
                      return (CTerm l (typeOf l), CTerm r (typeOf r))
 
-destBinC :: ConstName -> CTerm st -> Maybe (CTerm st, CTerm st)
+destBinC :: FQName ConstName -> CTerm st -> Maybe (CTerm st, CTerm st)
 destBinC n cterm
   | Constant n' ty :$ l :$ r <- ctermTerm cterm, n == n',
     tyl :-> tyr :-> _        <- ty  = Just (CTerm l tyl, CTerm r tyr)

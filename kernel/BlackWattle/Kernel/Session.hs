@@ -24,7 +24,7 @@ maybeToFail :: Monad m => Maybe a -> m a
 maybeToFail = maybe (fail "Nothing") return
 
 -- lift to Monad m from Maybe
-destBinC :: Monad m => ConstName -> Theorem st -> m (CTerm st, CTerm st)
+destBinC :: Monad m => FQName ConstName -> Theorem st -> m (CTerm st, CTerm st)
 destBinC n thm = maybeToFail $ Thm.destBinC n $ Thm.propC thm
 
 destCombC :: Monad m => CTerm st -> m (CTerm st, CTerm st)
@@ -43,13 +43,12 @@ ppWorld = do w <- readIORef worldState
 finish m_ethm = case m_ethm of
                   Nothing    -> putStrLn "Error"
                   Just ethm' -> do writeIORef currentThm ethm'
-                                   -- FIXME
-                                   print $ prettyTerm (extProp ethm')
-                                   
+                                   print $ prettyExtTheorem ethm'
+
 prove :: (forall st. WorldM st Term) -> IO ()
 prove m = do w <- readIORef worldState
-             let m_ethm  = runWorldM [] w (do tm  <- m
-                                              m_thm <- return $ Thm.assume (CTerm tm boolT)
+             let m_ethm  = runWorldM [] w (do tm  <- (m >>= certifyTerm)
+                                              m_thm <- return $ Thm.assume =<< tm
                                               case m_thm of
                                                 Nothing  -> return Nothing
                                                 Just thm -> Just <$> extern thm)

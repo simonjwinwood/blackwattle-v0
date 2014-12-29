@@ -22,18 +22,18 @@ import           BlackWattle.Kernel.Parser
 initWorld :: World
 initWorld = World (ContextTree rootContext M.empty)
 
-rootContext = foldr ($) root $ reverse $ run (\n def -> defineConst n (n ++ "_def") (typeOf def) def) defs
-                                         ++ run addAxiom axioms
+rootContext = foldr ($) root $ reverse $ run (\n def -> defineConst n (fqnName n ++ "_def") (typeOf def) def) defs
+                                         ++ run (\n def -> addAxiom (fqnName n) def) axioms
   where
-    parseOne :: (String -> a -> Ctxt -> Ctxt) -> (String, (forall st. WorldM st a)) -> Ctxt -> Ctxt
+    parseOne :: (FQName String -> a -> Ctxt -> Ctxt) -> (FQName String, (forall st. WorldM st a)) -> Ctxt -> Ctxt
     parseOne f (n, m) c    = f n (runWorldM [] initWorld m) c
 
     run f vs               = map (parseOne f) vs
 
-    axioms, defs :: [(String, (forall st. WorldM st Term))]
-    axioms = [ ("ETA_AX",      [termQ| !t : a -> b. (\x : a. t x) = t |] )
-             , ("SELECT_AX",   [termQ| !P : a -> bool. !x : a. P x --> P (SELECT P) |] )
-             , ("INFINITY_AX", [termQ| ?f : ind -> ind. ONE_ONE f /\ (NOT (ONTO f)) |] )
+    axioms, defs :: [(FQName String, (forall st. WorldM st Term))]
+    axioms = [ (FQN [] "ETA_AX" ,      [termQ| !t : a -> b. (\x : a. t x) = t |] )
+             , (FQN [] "SELECT_AX",   [termQ| !P : a -> bool. !x : a. P x --> P (SELECT P) |] )
+             , (FQN [] "INFINITY_AX", [termQ| ?f : ind -> ind. ONE_ONE f /\ (NOT (ONTO f)) |] )
              ]
 
     defs = [ (TrueN,   [termQ| (\p : bool. p) = (\p : bool. p) |])
@@ -51,8 +51,8 @@ rootContext = foldr ($) root $ reverse $ run (\n def -> defineConst n (n ++ "_de
      
     root = Ctxt { _freeTypes      = mempty
                 , _freeConstNames = mempty
-                , _consts         = M.fromList [(EqualN, a :-> a :-> boolT), (SelectN, (a :-> boolT) :-> a)]
-                , _types          = M.fromList [(BoolN, 0), (IndN, 0), (FunN, 2) ]
+                , _consts         = M.fromList [(fqnName EqualN, a :-> a :-> boolT), (fqnName SelectN, (a :-> boolT) :-> a)]
+                , _types          = M.fromList [(fqnName BoolN, 0), (fqnName IndN, 0), (fqnName FunN, 2) ]
                 , _theorems       = mempty
                 }
     a = TFree "a"

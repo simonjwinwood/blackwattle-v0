@@ -5,16 +5,18 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module BlackWattle.Kernel.World where
 
 import           Control.Applicative
 import           Control.Lens
 import           Control.Monad.Reader
+import           Control.Monad.State
 import           Data.List (inits)
 import           Data.Map (Map)
 import qualified Data.Map as M
-import           Data.Maybe (isNothing, listToMaybe, catMaybes)
+import           Data.Maybe (isNothing, listToMaybe, catMaybes, fromMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as S
 
@@ -88,11 +90,48 @@ instance Externable Theorem where
                                        , prop       = extProp ethm
                                        }
 
+-- FIXME: make more efficient (early return or something)
+isTyInstOf :: Type -> Type -> Bool
+ty `isTyInstOf` ty' = evalState (go ty ty') []
+  where
+    go conc schem@(TFree _)            = do m_ty <- gets (lookup schem)
+                                            go' conc (fromMaybe schem m_ty)
+    go' conc schem@(TFree _)           = do modify (addTypeSubst schem conc)
+                                            return True
+    go' (TConst c tys) (TConst c' tys')
+      | c == c'                        = and <$> zipWithM go tys tys'
+      | otherwise                      = return False
+
+typeCheck ::  Term -> WorldM st (Maybe Type)
+typeCheck = go []
+  where
+    go _env t@(Free _ ty)     = return $ Just ty
+    go env  (Bound n)
+      | n < length env        = return (Just $ env !! n)
+      | otherwise             = fail "Unknown binder"
+    go _env t@(Constant n ty) = do m_ty' <- resolveFQN consts n
+                                   unless (maybe False (isTyInstOf ty) m_ty') $ fail "type mismatch"
+                                   return $ Just ty
+    go env (Lambda n ty b)    = do Just bodyTy <- go (ty : env) b
+                                   return (Just $ ty :-> bodyTy)
+    go env (l :$ r)           = do Just (lty :-> resTy) <- go env l
+                                   Just rty           <- go env r
+                                   unless (lty == rty) $ fail "type mismatch"
+                                   return $ Just resTy
+
+certifyTerm :: Term -> WorldM st (Maybe (CTerm st))
+certifyTerm tm = do m_ty <- typeCheck tm
+                    return $ CTerm tm <$> m_ty
+
 contextIdToTraversal :: ContextId -> Traversal' ContextTree Ctxt
 contextIdToTraversal = go
   where
     go []        = ctContext
     go (c : cid) = ctChildren . ix c . go cid
+
+resolveFQN :: Ord a => Lens' Ctxt (Map a b) -> FQName a -> WorldM st (Maybe b)
+resolveFQN l fqn = do m <- view (world . contextTree . contextIdToTraversal (fqnContext fqn) . l)
+                      return (M.lookup (fqnName fqn) m)
 
 resolve :: Lens' Ctxt (Maybe a) -> WorldM st (Maybe (ContextId, a))
 resolve l = go <$> view (world . contextTree) <*> view contextId
@@ -120,9 +159,6 @@ resolveTheorem thmN = do m_tm <- resolve (theorems . at thmN)
 --                      in case cid of
 --                           []         -> return acc'
 --                           (c : cid') -> go acc' cid' =<< M.lookup c (ctChildren tree)
-
-rootContextId :: ContextId
-rootContextId  = []
 
 applyMorphism :: WorldMorphism -> World -> Maybe World
 applyMorphism (TypeMorphism cid n ethm) = newType cid n ethm (n ++ "_abs") (n ++ "_rep") (n ++ "_thm1") (n ++ "_thm2")
@@ -165,9 +201,9 @@ newType cid typeN ethm absN repN thmN1 thmN2 w
                      let tfrees  = freeTypesInTerm p
                          arity   = length tfrees
                          rty     = typeOf t
-                         aty     = TConst typeN (map TFree tfrees)
-                         abs_tm  = Constant absN (rty :-> aty)
-                         rep_tm  = Constant repN (aty :-> rty)
+                         aty     = TConst (FQN cid typeN) (map TFree tfrees)
+                         abs_tm  = Constant (FQN cid absN) (rty :-> aty)
+                         rep_tm  = Constant (FQN cid repN) (aty :-> rty)
                          a_var   = Free "a" aty
                          r_var   = Free "r" rty
                          a_r_thm = mkEq aty (abs_tm :$ (rep_tm :$ a_var)) a_var 
