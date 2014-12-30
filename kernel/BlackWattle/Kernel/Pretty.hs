@@ -1,3 +1,4 @@
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE PatternSynonyms #-}
 
@@ -8,8 +9,7 @@ import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
-import qualified Text.PrettyPrint as P
-import           Text.PrettyPrint hiding (parens)
+import Text.PrettyPrint
 
 import           BlackWattle.Kernel.Types
 import           BlackWattle.Kernel.Term
@@ -18,7 +18,7 @@ import           BlackWattle.Kernel.Theorem
 import           BlackWattle.Kernel.World
 
 pparens :: Bool -> Doc -> Doc
-pparens b s = if b then P.parens s else s 
+pparens b s = if b then parens s else s 
 
 prettyTypeSubst :: TypeSubst -> Doc
 prettyTypeSubst = vcat . map (\(v, t) -> prettyType v <+> colon <+> prettyType t)
@@ -37,10 +37,26 @@ prettyTerm = go [] False
       app env (Constant EqualN _) [l, r] = go env True l <+> equals <+> go env True r
       app env (Constant AndN _)   [l, r] = go env True l <+> text "/\\" <+> go env True r
       app env (Constant ImplN _)  [l, r] = go env True l <+> text "-->" <+> go env True r
-      app env t                as     = go env False t <+> args env False as
+      app env t                as        = go env True t <+> args env False as
 
       args _ _ []            = empty 
       args env p as          = hsep $ map (go env True) as
+
+prettyDebugTerm :: Term -> Doc
+prettyDebugTerm = go []
+    where
+      go _   (Free {..})     = parens (text freeName <+> colon <+> prettyType typ)
+      go env (Bound {..})    = text $ fst $ env !! depth
+      go _   (Constant {..}) = parens (prettyFQN text constName <+> colon <+> prettyType typ)
+      go env t               = let (bs, t', as) = flatten t 
+                               in parens $ binds bs <+> app (bs ++ env) t' as
+      binds []               = empty
+      binds bs               = text "\\" <> hsep (map (\(n, ty) -> parens (text n <+> colon <+> prettyType ty) ) $ reverse bs) <> text "."
+
+      app env t    as        = go env t <+> args env as
+
+      args _ []            = empty 
+      args env as          = hsep $ map (go env) as
 
 prettyFQN :: (a -> Doc) -> FQName a -> Doc
 prettyFQN f fqn = (cat $ punctuate (text ".") (map text $ fqnContext fqn)) <> text "." <> f (fqnName fqn)
@@ -77,3 +93,8 @@ prettyExtTheorem thm = brackets (sep $ punctuate comma $ map prettyTerm $ extHyp
                         <+> text "|-"
                         <+> prettyTerm (extProp thm)
 
+ppTuple :: (a -> Doc) -> (b -> Doc) -> (a, b) -> Doc
+ppTuple f g (a, b) = parens (f a <> comma <+> g b)
+
+ppCTerm :: CTerm st -> Doc
+ppCTerm (CTerm tm _) = prettyTerm tm

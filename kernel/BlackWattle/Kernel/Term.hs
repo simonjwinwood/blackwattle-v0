@@ -239,7 +239,7 @@ liftBound :: Int -> Int -> Term -> Term
 liftBound = go
     where
     go m d t@(Bound d')
-        | d' < d           = Bound (d' + m)
+        | d < d'           = Bound (d' + m)
         | otherwise        = t
     go m d (t :$ t')       = (go m d t) :$ (go m d t')
     go m d (Lambda n tp t) = Lambda n tp (go (m + 1) (d + 1) t)

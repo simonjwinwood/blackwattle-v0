@@ -25,15 +25,15 @@ import           BlackWattle.Kernel.Term
 import           BlackWattle.Kernel.Theorem
 import           BlackWattle.Kernel.Context
 
-class Monad m => MonadWorld (m :: * -> *) where
-  type WorldTag m
-  currentWorld     :: m World
-  currentContextId :: m ContextId
+-- class Monad m => MonadWorld (m :: * -> *) where
+--   type WorldTag m
+--   currentWorld     :: m World
+--   currentContextId :: m ContextId
 
 class Externable f where
   type ExternType f
-  extern :: MonadWorld m => f (WorldTag m)   -> m (ExternType f)
-  intern :: MonadWorld m => ExternType f     -> m (Maybe (f (WorldTag m))) -- Either Reason (f st) ??
+  extern :: Monad m => f st         -> WorldT st m (ExternType f)
+  intern :: Monad m => ExternType f -> WorldT st m (Maybe (f st))
 
 -- BlackWattleMonad, or BWM for short
 -- newtype BWM a = BWM { unBWM :: ExceptT String (State Universe) a }
@@ -51,7 +51,7 @@ data WorldMState = WMS { _contextId :: ContextId
                         , _world     :: World
                         }
 
-newtype WorldT st m a = WorldT { unWorldM :: ReaderT WorldMState m a }
+newtype WorldT st m a = WorldT { unWorldT :: ReaderT WorldMState m a }
         deriving (Functor, Applicative, Monad, MonadReader WorldMState, MonadTrans)
 
 type WorldM st a = WorldT st Identity a
@@ -65,16 +65,19 @@ makeLenses ''World
 makeLenses ''WorldMState
 makeLenses ''ContextTree
 
-instance Monad m => MonadWorld (WorldT st m) where
-  type WorldTag (WorldT st m) = st
-  currentWorld     = view world
-  currentContextId = view contextId
+-- instance Monad m => MonadWorld (WorldT st m) where
+--   type WorldTag (WorldT st m) = st
+--   currentWorld     = view world
+--   currentContextId = view contextId
 
 runWorldT :: ContextId -> World -> (forall st. WorldT st m a) -> m a
-runWorldT cid w m = runReaderT (unWorldM m) (WMS cid w)
+runWorldT cid w m = runReaderT (unWorldT m) (WMS cid w)
 
 runWorldM :: ContextId -> World -> (forall st. WorldM st a) -> a
-runWorldM cid w m = runReader (unWorldM m) (WMS cid w)
+runWorldM cid w m = runReader (unWorldT m) (WMS cid w)
+
+mapWorldT :: (m a -> n b) -> WorldT st m a -> WorldT st n b
+mapWorldT f m = WorldT $ mapReaderT f (unWorldT m)
 
 -- FIXME!!
 instance Externable Theorem where
@@ -90,12 +93,23 @@ instance Externable Theorem where
                                        , prop       = extProp ethm
                                        }
 
+-- FIXME: move
+liftMaybe :: WorldM st (Maybe a) -> WorldT st Maybe a
+liftMaybe = mapWorldT runIdentity
+
+instance Externable CTerm where
+  type ExternType CTerm = Term
+  extern (CTerm tm _) = return tm
+  intern tm           = mapWorldT (return . runIdentity) $ certifyTerm tm
+
 -- FIXME: make more efficient (early return or something)
-isTyInstOf :: Type -> Type -> Bool
-ty `isTyInstOf` ty' = evalState (go ty ty') []
+isTyInstOf :: Type -> Type -> Maybe TypeSubst
+ty `isTyInstOf` ty' = if match then Just instsT else Nothing
   where
+    (match, instsT)        = runState (go ty ty') emptySubst
     go conc schem@(TFree _)            = do m_ty <- gets (lookup schem)
                                             go' conc (fromMaybe schem m_ty)
+    go conc schem                      = go' conc schem
     go' conc schem@(TFree _)           = do modify (addTypeSubst schem conc)
                                             return True
     go' (TConst c tys) (TConst c' tys')
@@ -110,7 +124,7 @@ typeCheck = go []
       | n < length env        = return (Just $ env !! n)
       | otherwise             = fail "Unknown binder"
     go _env t@(Constant n ty) = do m_ty' <- resolveFQN consts n
-                                   unless (maybe False (isTyInstOf ty) m_ty') $ fail "type mismatch"
+                                   unless (maybe False (const True) (isTyInstOf ty =<< m_ty')) $ fail "type mismatch"
                                    return $ Just ty
     go env (Lambda n ty b)    = do Just bodyTy <- go (ty : env) b
                                    return (Just $ ty :-> bodyTy)

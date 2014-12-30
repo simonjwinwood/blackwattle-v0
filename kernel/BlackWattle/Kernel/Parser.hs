@@ -6,7 +6,7 @@
 
 -- A simple parser for making writing some terms nicer.  Only in the kernel for bootstrapping ...
 
-module BlackWattle.Kernel.Parser (termQ, typeQ, debugTermQ) where
+module BlackWattle.Kernel.Parser (termQ, typeQ, debugTermQ, ctermQ) where
 
 import           Control.Applicative ( (<$>), (<*>) )
 import           Control.Lens
@@ -14,6 +14,8 @@ import           Control.Monad.Identity
 import           Control.Monad.State
 import           Data.Data
 import           Data.List (elemIndex, elem)
+import           Data.Map (Map)
+import qualified Data.Map as M
 import           Data.Maybe (fromMaybe)
 import qualified Language.Haskell.TH as TH
 import           Language.Haskell.TH.Quote
@@ -24,6 +26,7 @@ import           BlackWattle.Kernel.Context (types, consts)
 import           BlackWattle.Kernel.Term
 import           BlackWattle.Kernel.Types
 import           BlackWattle.Kernel.World
+import           BlackWattle.Kernel.Pretty
 
 -- Might not need the intermediate types?
 data TypeTree = TVarQ String
@@ -69,18 +72,15 @@ unifyTypes ty ty' subst = execStateT (go ty ty') subst
 
 -- resolves any type variables such that the term will type check.  Fails
 -- if there is no possible assignment to the type variables.
-elaborate :: Term -> Maybe Term
+elaborate :: Term ->  Maybe Term
 elaborate tm = finalSubst <$> runStateT (go [] tm) (emptySubst, freshTVars')
   where
     freeTVars   = freeTypesInTerm tm
     freshTVars' = filter (`notElem` freeTVars) freshTVars
-
-    fresh' :: Monad m => StateT (a, [String]) m String
-    fresh' = _2 %%= \(v : vs) -> (v, vs)
     
     substTypeInTerm = substTermType emptySubst
     finalSubst ((tm', _), (instsT, _)) = substTypeInTerm instsT tm'
-
+    
     go :: [Type] -> Term -> StateT (TypeSubst, [String]) Maybe (Term, Type)    
     go _env t@(Free _ ty)     = return (t, ty)
     go env t@(Bound n)
@@ -91,8 +91,12 @@ elaborate tm = finalSubst <$> runStateT (go [] tm) (emptySubst, freshTVars')
                                   return (Lambda n ty body', ty :-> bodyTy)
     go env (l :$ r)          = do (l', lty) <- go env l
                                   (r', rty) <- go env r
-                                  resTy     <- TFree <$> fresh'
-                                  instsT'   <- gets fst >>= lift . unifyTypes lty (rty :-> resTy)
+                                  resTy     <- TFree <$> fresh _2
+                                  instsT    <- gets fst
+                                  let lty' = (rty :-> resTy)
+                                      res = unifyTypes lty lty' instsT
+                                  instsT' <- maybe (error $ "Couldn't unify " ++ show (prettyType lty) ++ " and " ++ show (prettyType lty')) return res
+                                  -- instsT'   <- gets fst >>= lift . unifyTypes lty (rty :-> resTy)
                                   _1 %= const instsT'
                                   -- OK that this is a fresh var here, will be expanded later
                                   return (l' :$ r', resTy) 
@@ -105,22 +109,22 @@ elaborate tm = finalSubst <$> runStateT (go [] tm) (emptySubst, freshTVars')
 freshTVars :: [String]
 freshTVars = map ((++) "a" . show) [1..] -- we assume a1, a2, ... are free.
 
-fresh :: Monad m => StateT [String] m String
-fresh = state (\(v:vs) -> (v, vs))
+fresh :: MonadState a m => Lens' a [String] -> m String
+fresh l = l %%= (\(v:vs) -> (v, vs))
 
-renameT :: (Monad m, Functor m) => Type -> StateT [String] m Type
-renameT ty = do let freeTs = freeTypesInType ty
-                instsT <- mapM (\n -> (TFree n, ) . TFree <$> fresh) freeTs
-                return $ substType instsT ty
+renameT :: (MonadState a m, Functor m) => Lens' a [String] -> Type -> m Type
+renameT l ty = do let freeTs = freeTypesInType ty
+                  instsT <- mapM (\n -> (TFree n, ) . TFree <$> fresh l) freeTs
+                  return $ substType instsT ty
 
 typeTreeToType :: TypeTree -> WorldM st Type
-typeTreeToType tree = evalStateT (typeTreeToType' tree) freshTVars
+typeTreeToType tree = evalStateT (typeTreeToType' id tree) freshTVars
 
-typeTreeToType' :: TypeTree -> StateT [String] (WorldT st Identity) Type
-typeTreeToType' tree = go [] tree
+typeTreeToType' :: Lens' a [String]  -> TypeTree -> StateT a (WorldT st Identity) Type
+typeTreeToType' l tree = go [] tree
   where
-   go :: forall st. [Type] -> TypeTree -> StateT [String] (WorldT st Identity) Type
-   go _targs (TVarQ "") = TFree <$> fresh
+   -- go :: forall st. [Type] -> TypeTree -> StateT a (WorldT st Identity) Type
+   go _targs (TVarQ "") = TFree <$> fresh l
    go targs (TVarQ v)   = do m_arity <- lift (resolveType v)
                              case m_arity of
                                 Nothing
@@ -142,20 +146,34 @@ typeTreeToType' tree = go [] tree
 -- type vars with fresh variables.
 
 termTreeToTerm :: TermTree -> WorldM st Term
-termTreeToTerm t = evalStateT (go [] t) freshTVars
+termTreeToTerm t = (\tm -> fromMaybe (error $ "Couldn't elaborate " ++ show tm) (elaborate tm)) <$> evalStateT (go [] t) (M.empty, freshTVars)
   where
+    -- keeps track of frees we have already seen so we get the same type for both ... not absolutely
+    -- required, but otherwise might be confusing.
+    freshMaybe n = state (\st@(seen, freshTs@(v:vs)) -> case M.lookup n seen of
+                                                            Nothing -> (v, (M.insert n v seen, vs))
+                                                            Just v' -> (v', st)
+                                                           )
+
     go env (VarQ v) 
       | Just n <- elemIndex v env = return $ Bound n
       | otherwise  = do m_type <- lift $ resolveConst v
                         case m_type of
-                          Nothing         -> Free v . TFree <$> fresh
-                          Just (cid, ty) -> Constant (FQN cid v) <$> renameT ty
-    go env (LambdaQ n ty tm) = Lambda n <$> typeTreeToType' ty <*> go (n : env) tm
+                          Nothing         -> Free v . TFree <$> freshMaybe v
+                          Just (cid, ty)  -> Constant (FQN cid v) <$> renameT _2 ty
+    go env (LambdaQ n ty tm) = Lambda n <$> typeTreeToType' _2 ty <*> go (n : env) tm
     go env (AppQ l r)        = (:$) <$> go env l <*> go env r
     go _   (MetaInstQ t)     = return t
     go _   (MetaQ _)         = error $ "Meta"
 
 type ParserM a = Parsec String () a
+
+ctermQ :: QuasiQuoter
+ctermQ = QuasiQuoter { quoteExp = \s -> [| termTreeToTerm $( quotePExp termP antiExp s ) >>= intern |]
+                     , quotePat = undefined -- termPat
+                     , quoteDec = undefined
+                     , quoteType = undefined 
+                     }
 
 termQ :: QuasiQuoter
 termQ = QuasiQuoter { quoteExp = \s -> [| termTreeToTerm $( quotePExp termP antiExp s ) |]
